@@ -4,10 +4,11 @@
 # the resulting context, cluster and user. Hosts and their kubeconfig files live in
 # ~/.config/openunison-config.yaml
 
-OU_LOGIN_VERSION="0.1.0"
+OU_LOGIN_VERSION="0.1.1"
 
 if [ -t 1 ]; then
   red=$(tput setaf 1)
+  gold=$(tput setaf 3)
   cyan=$(tput setaf 6)
   default=$(tput sgr0)
 fi
@@ -17,8 +18,10 @@ conf="${OU_LOGIN_CONFIG:-$HOME/.config/openunison-config.yaml}"
 usage() {
   cat <<EOF
 Usage: ou-login [hostname]
+       ou-login add
 
 Log in to an OpenUnison host. With no hostname, pick one with fzf.
+"add" prompts for a new host and appends it to the config.
 
 Options:
   -h, --help     Show this help
@@ -38,19 +41,70 @@ die() {
   exit 1
 }
 
+check_version() {
+  command -v curl >/dev/null 2>&1 || return 0
+  local latest
+  latest=$(curl -s --max-time 5 "https://api.github.com/repos/peledies/ou-login/releases/latest" 2>/dev/null |
+    yq -p json '.tag_name // ""' 2>/dev/null)
+  latest="${latest#v}"
+  if [ -n "$latest" ] && [ "$latest" != "$OU_LOGIN_VERSION" ]; then
+    echo "${gold}Update available: v${latest} (current: v${OU_LOGIN_VERSION})${default}" >&2
+    echo "${gold}Run: brew upgrade ou-login${default}" >&2
+  fi
+}
+
+create_config() {
+  mkdir -p "$(dirname "$conf")" && echo "hosts: []" > "$conf" || die "Could not write ${conf}"
+  echo "${cyan}Created ${conf}${default}"
+}
+
+add_host() {
+  local h k c def
+  read -r -p "OpenUnison hostname: " h
+  [ -n "$h" ] || die "A hostname is required."
+  if [ -f "$conf" ] && [ -n "$(H="$h" yq '.hosts[] | select(.hostname == strenv(H)) | .hostname' "$conf")" ]; then
+    die "'${h}' is already in ${conf}."
+  fi
+  read -r -p "Context name (optional): " c
+  def="~/.kube/config${c:+-$c}"
+  read -r -p "Kubeconfig file [${def}]: " k
+  k="${k:-$def}"
+
+  [ -f "$conf" ] || create_config
+  H="$h" K="$k" C="$c" yq -i '
+    .hosts += [{"hostname": strenv(H), "kubeconfig": strenv(K), "context": strenv(C)}] |
+    del(.hosts[] | select(.context == "") | .context)
+  ' "$conf" || die "Could not update ${conf}"
+  echo "${cyan}Added ${h} to ${conf}${default}"
+}
+
 case "$1" in
   -h|--help) usage; exit 0 ;;
   -v|--version) echo "ou-login ${OU_LOGIN_VERSION}"; exit 0 ;;
   -*) usage >&2; exit 1 ;;
 esac
 
-for dep in yq kubectl; do
-  command -v "$dep" >/dev/null 2>&1 || die "Required command not found: ${dep}"
-done
+command -v yq >/dev/null 2>&1 || die "Required command not found: yq"
+
+if [ "$1" = "add" ]; then
+  add_host
+  exit 0
+fi
+
+command -v kubectl >/dev/null 2>&1 || die "Required command not found: kubectl"
+
+check_version
 
 host="$1"
 
-[ -f "$conf" ] || die "Config not found: ${conf}"
+if [ ! -f "$conf" ]; then
+  [ -t 0 ] || die "Config not found: ${conf}"
+  read -r -p "Config not found: ${conf}. Create it? [y/N] " reply
+  [[ "$reply" =~ ^[Yy] ]] || exit 1
+  create_config
+  echo "${cyan}Run 'ou-login add' to add a host.${default}"
+  exit 0
+fi
 
 if [ -z "$host" ]; then
   command -v fzf >/dev/null 2>&1 || die "No hostname given and fzf is not installed."
