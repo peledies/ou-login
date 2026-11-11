@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+
+# Description: Log in to an OpenUnison host with kubectl openunison-cli and rename
+# the resulting context, cluster and user. Hosts and their kubeconfig files live in
+# ~/.config/openunison-config.yaml
+
+OU_LOGIN_VERSION="0.1.0"
+
+if [ -t 1 ]; then
+  red=$(tput setaf 1)
+  cyan=$(tput setaf 6)
+  default=$(tput sgr0)
+fi
+
+conf="${OU_LOGIN_CONFIG:-$HOME/.config/openunison-config.yaml}"
+
+usage() {
+  cat <<EOF
+Usage: ou-login [hostname]
+
+Log in to an OpenUnison host. With no hostname, pick one with fzf.
+
+Options:
+  -h, --help     Show this help
+  -v, --version  Show the version
+
+Config: ${conf} (override with OU_LOGIN_CONFIG)
+
+  hosts:
+    - hostname: k8sou.example.com
+      kubeconfig: ~/.kube/config-playground
+      context: playground   # optional; renames context, cluster and user
+EOF
+}
+
+die() {
+  echo "${red}$*${default}" >&2
+  exit 1
+}
+
+case "$1" in
+  -h|--help) usage; exit 0 ;;
+  -v|--version) echo "ou-login ${OU_LOGIN_VERSION}"; exit 0 ;;
+  -*) usage >&2; exit 1 ;;
+esac
+
+for dep in yq kubectl; do
+  command -v "$dep" >/dev/null 2>&1 || die "Required command not found: ${dep}"
+done
+
+host="$1"
+
+[ -f "$conf" ] || die "Config not found: ${conf}"
+
+if [ -z "$host" ]; then
+  command -v fzf >/dev/null 2>&1 || die "No hostname given and fzf is not installed."
+  host=$(yq '.hosts[].hostname' "$conf" | fzf --height 40% --layout reverse --header "OpenUnison login") || exit 1
+fi
+
+cfg=$(H="$host" yq '.hosts[] | select(.hostname == strenv(H)) | .kubeconfig // ""' "$conf")
+ctx=$(H="$host" yq '.hosts[] | select(.hostname == strenv(H)) | .context // ""' "$conf")
+cfg="${cfg/#\~/$HOME}"
+
+[ -n "$cfg" ] || die "Unknown host '${host}'. Add it to ${conf}."
+
+echo "${cyan}Logging in to ${host}${default}"
+echo "${cyan}Using kubeconfig: ${cfg}${default}"
+KUBECONFIG="$cfg" kubectl openunison-cli login "$host" || exit 1
+
+[ -z "$ctx" ] && exit 0
+
+# Rename the context, cluster and user the login wrote (e.g. user@playground,
+# playground, user@playground) to $ctx. On a re-login the old $ctx entries are
+# replaced by the fresh ones.
+src=$(N="$ctx" yq '.contexts[].name | select(. != strenv(N))' "$cfg")
+if [ "$(printf '%s\n' "$src" | grep -c .)" -gt 1 ]; then
+  echo "${red}More than one other context in ${cfg}; not renaming:${default}" >&2
+  printf '%s\n' "$src" >&2
+  exit 1
+fi
+[ -z "$src" ] && src="$ctx"
+
+cl=$(S="$src" yq '.contexts[] | select(.name == strenv(S)) | .context.cluster' "$cfg")
+us=$(S="$src" yq '.contexts[] | select(.name == strenv(S)) | .context.user' "$cfg")
+
+N="$ctx" S="$src" C="$cl" U="$us" yq -i '
+  del(.contexts[] | select(.name == strenv(N) and .name != strenv(S))) |
+  del(.clusters[] | select(.name == strenv(N) and .name != strenv(C))) |
+  del(.users[]    | select(.name == strenv(N) and .name != strenv(U))) |
+  (.contexts[] | select(.name == strenv(S)) | .name) = strenv(N) |
+  (.contexts[] | select(.name == strenv(N)) | .context.cluster) = strenv(N) |
+  (.contexts[] | select(.name == strenv(N)) | .context.user) = strenv(N) |
+  (.clusters[] | select(.name == strenv(C)) | .name) = strenv(N) |
+  (.users[]    | select(.name == strenv(U)) | .name) = strenv(N) |
+  .current-context = strenv(N)
+' "$cfg" || exit 1
+echo "${cyan}Context, cluster and user: ${ctx}${default}"
