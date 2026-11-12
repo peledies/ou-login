@@ -42,6 +42,10 @@ ou-login --help
 
 Before each login, ou-login checks GitHub for a newer release and, if there is one, prints a note suggesting `brew upgrade ou-login`. The check times out after 5 seconds and is skipped if `curl` isn't installed or GitHub can't be reached.
 
-After logging in, ou-login runs `kubectl config use-context` with your normal `KUBECONFIG`, so `kubectl` points at the cluster you picked. It switches to `context` if that's set, or otherwise to the context the login created. This only works if the host's kubeconfig file is in your `KUBECONFIG` list. If it isn't, ou-login prints the `export KUBECONFIG=...` line to add.
+After logging in, ou-login runs `kubectl config use-context` with your normal `KUBECONFIG`, so `kubectl` points at the cluster you picked. It switches to `context` if that's set, or otherwise to the context the login created. This only works if the host's kubeconfig file is in your `KUBECONFIG` list. If it isn't, ou-login suggests adding this to your shell profile, which loads every `config*` file under `~/.kube`:
+
+```bash
+export KUBECONFIG=$(find ~/.kube -name 'config*' | sort | tr '\n' ':')
+```
 
 When `context` is set, a re-login replaces the earlier entries of that name with the new ones. If the kubeconfig holds more than one other context, ou-login doesn't rename anything, because it can't tell which one the login created.

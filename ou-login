@@ -164,5 +164,5 @@ if kubectl config get-contexts -o name 2>/dev/null | grep -qxF "$ctx"; then
   echo "${cyan}Current context: ${ctx}${default}"
 else
   echo "${gold}${cfg} is not in your KUBECONFIG, so '${ctx}' is only current in that file.${default}" >&2
-  echo "${gold}Run: export KUBECONFIG=\"\${KUBECONFIG:-\$HOME/.kube/config}:${cfg}\"${default}" >&2
+  echo "${gold}Add to your shell profile: export KUBECONFIG=\$(find ~/.kube -name 'config*' | sort | tr '\\n' ':')${default}" >&2
 fi
