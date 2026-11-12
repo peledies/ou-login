@@ -4,7 +4,7 @@
 # the resulting context, cluster and user. Hosts and their kubeconfig files live in
 # ~/.config/openunison-config.yaml
 
-OU_LOGIN_VERSION="0.1.1"
+OU_LOGIN_VERSION="0.1.2"
 
 if [ -t 1 ]; then
   red=$(tput setaf 1)
@@ -49,7 +49,7 @@ check_version() {
   latest="${latest#v}"
   if [ -n "$latest" ] && [ "$latest" != "$OU_LOGIN_VERSION" ]; then
     echo "${gold}Update available: v${latest} (current: v${OU_LOGIN_VERSION})${default}" >&2
-    echo "${gold}Run: brew upgrade ou-login${default}" >&2
+    echo "${gold}Run: brew update && brew upgrade ou-login${default}" >&2
   fi
 }
 
@@ -76,6 +76,35 @@ add_host() {
     del(.hosts[] | select(.context == "") | .context)
   ' "$conf" || die "Could not update ${conf}"
   echo "${cyan}Added ${h} to ${conf}${default}"
+}
+
+rename_context() {
+  # Rename the context, cluster and user the login wrote (e.g. user@playground,
+  # playground, user@playground) to $ctx. On a re-login the old $ctx entries are
+  # replaced by the fresh ones.
+  src=$(N="$ctx" yq '.contexts[].name | select(. != strenv(N))' "$cfg")
+  if [ "$(printf '%s\n' "$src" | grep -c .)" -gt 1 ]; then
+    echo "${red}More than one other context in ${cfg}; not renaming:${default}" >&2
+    printf '%s\n' "$src" >&2
+    return 1
+  fi
+  [ -z "$src" ] && src="$ctx"
+
+  cl=$(S="$src" yq '.contexts[] | select(.name == strenv(S)) | .context.cluster' "$cfg")
+  us=$(S="$src" yq '.contexts[] | select(.name == strenv(S)) | .context.user' "$cfg")
+
+  N="$ctx" S="$src" C="$cl" U="$us" yq -i '
+    del(.contexts[] | select(.name == strenv(N) and .name != strenv(S))) |
+    del(.clusters[] | select(.name == strenv(N) and .name != strenv(C))) |
+    del(.users[]    | select(.name == strenv(N) and .name != strenv(U))) |
+    (.contexts[] | select(.name == strenv(S)) | .name) = strenv(N) |
+    (.contexts[] | select(.name == strenv(N)) | .context.cluster) = strenv(N) |
+    (.contexts[] | select(.name == strenv(N)) | .context.user) = strenv(N) |
+    (.clusters[] | select(.name == strenv(C)) | .name) = strenv(N) |
+    (.users[]    | select(.name == strenv(U)) | .name) = strenv(N) |
+    .current-context = strenv(N)
+  ' "$cfg" || return 1
+  echo "${cyan}Context, cluster and user: ${ctx}${default}"
 }
 
 case "$1" in
@@ -121,31 +150,19 @@ echo "${cyan}Logging in to ${host}${default}"
 echo "${cyan}Using kubeconfig: ${cfg}${default}"
 KUBECONFIG="$cfg" kubectl openunison-cli login "$host" || exit 1
 
-[ -z "$ctx" ] && exit 0
-
-# Rename the context, cluster and user the login wrote (e.g. user@playground,
-# playground, user@playground) to $ctx. On a re-login the old $ctx entries are
-# replaced by the fresh ones.
-src=$(N="$ctx" yq '.contexts[].name | select(. != strenv(N))' "$cfg")
-if [ "$(printf '%s\n' "$src" | grep -c .)" -gt 1 ]; then
-  echo "${red}More than one other context in ${cfg}; not renaming:${default}" >&2
-  printf '%s\n' "$src" >&2
-  exit 1
+if [ -n "$ctx" ]; then
+  rename_context || exit 1
+else
+  ctx=$(yq '.current-context // ""' "$cfg")
 fi
-[ -z "$src" ] && src="$ctx"
 
-cl=$(S="$src" yq '.contexts[] | select(.name == strenv(S)) | .context.cluster' "$cfg")
-us=$(S="$src" yq '.contexts[] | select(.name == strenv(S)) | .context.user' "$cfg")
-
-N="$ctx" S="$src" C="$cl" U="$us" yq -i '
-  del(.contexts[] | select(.name == strenv(N) and .name != strenv(S))) |
-  del(.clusters[] | select(.name == strenv(N) and .name != strenv(C))) |
-  del(.users[]    | select(.name == strenv(N) and .name != strenv(U))) |
-  (.contexts[] | select(.name == strenv(S)) | .name) = strenv(N) |
-  (.contexts[] | select(.name == strenv(N)) | .context.cluster) = strenv(N) |
-  (.contexts[] | select(.name == strenv(N)) | .context.user) = strenv(N) |
-  (.clusters[] | select(.name == strenv(C)) | .name) = strenv(N) |
-  (.users[]    | select(.name == strenv(U)) | .name) = strenv(N) |
-  .current-context = strenv(N)
-' "$cfg" || exit 1
-echo "${cyan}Context, cluster and user: ${ctx}${default}"
+# Switch the context in the user's own kubectl setup (KUBECONFIG may merge
+# several files, and the first file's current-context wins).
+[ -n "$ctx" ] || exit 0
+if kubectl config get-contexts -o name 2>/dev/null | grep -qxF "$ctx"; then
+  kubectl config use-context "$ctx" >/dev/null || exit 1
+  echo "${cyan}Current context: ${ctx}${default}"
+else
+  echo "${gold}${cfg} is not in your KUBECONFIG, so '${ctx}' is only current in that file.${default}" >&2
+  echo "${gold}Run: export KUBECONFIG=\"\${KUBECONFIG:-\$HOME/.kube/config}:${cfg}\"${default}" >&2
+fi
